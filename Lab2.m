@@ -352,4 +352,176 @@ grid on; axis equal;
 xlim([-3, 3]); ylim([-3, 3]);
 legend('Принятые символы', 'Идеальное созвездие');
 hold off;
+%% ДОП ЗАДАНИЕ 2.6: ДОПЛЕРОВСКИЕ СПЕКТРЫ EPA5, EVA70, ETU300
+fprintf('\nДОП ЗАДАНИЕ 2.6: Доплеровские спектры\n');
 
+fD_values_dop = [5 70 300];
+N_symbols_doppler = [100000, 30000, 20000];
+
+channel_names_dop = {'EPA5','EVA70','ETU300'};
+delays_dop = {EPA_delays, EVA_delays, ETU_delays};
+gains_dop = {EPA_gains_dB, EVA_gains_dB, ETU_gains_dB}; 
+colors_dop = {'b','r','g'};
+
+Fs_doppler = 1 / T_sym;  
+
+Nfft_doppler = 2^18;
+window_len_EPA = 8192;
+window_len_default = 2048;
+win_EPA = hamming(window_len_EPA);
+win_default = hamming(window_len_default);
+noverlap_EPA = window_len_EPA/2;
+noverlap_default = window_len_default/2;
+
+figure(18);
+clf;
+hold on;
+grid on;
+
+for idx = 1:length(fD_values_dop)
+    fD = fD_values_dop(idx);
+    N_sym = N_symbols_doppler(idx);
+    
+    if idx == 1
+        win = win_EPA;
+        noverlap = noverlap_EPA;
+    else
+        win = win_default;
+        noverlap = noverlap_default;
+    end
+
+    chan = comm.RayleighChannel( ...
+        'SampleRate', Fs_doppler, ...
+        'PathDelays', delays_dop{idx}, ...
+        'AveragePathGains', gains_dop{idx}, ...
+        'MaximumDopplerShift', fD, ...
+        'NormalizePathGains', true, ...
+        'DopplerSpectrum', doppler('Jakes'), ...
+        'PathGainsOutputPort', true);
+
+    release(chan);
+    [~, pathGains] = chan(ones(N_sym,1));
+
+    h_dop = pathGains(:,1);
+
+    [Pxx, f] = pwelch(h_dop, win, noverlap, ...
+        Nfft_doppler, Fs_doppler, 'centered');
+
+    Pxx_dB = 10*log10(Pxx/max(Pxx) + eps);
+
+    mask = abs(f) <= min(Fs_doppler/2, 1.5*fD);
+
+    plot(f(mask), Pxx_dB(mask), colors_dop{idx}, ...
+        'LineWidth', 1.5, ...
+        'DisplayName', sprintf('%s (f_D=%d Гц)', ...
+        channel_names_dop{idx}, fD));
+end
+
+xlabel('Доплеровская частота, Гц');
+ylabel('Нормированная PSD, дБ');
+title('Доплеровские спектры каналов (модель Джейкса)');
+legend('Location','best');
+xlim([-500 500]);
+ylim([-50 5]);
+hold off;
+
+fprintf('Доплеровские спектры построены.\n');
+%% ДОП ЗАДАНИЕ 2.7: ВРЕМЯ КОГЕРЕНТНОСТИ
+fprintf('\nДОП ЗАДАНИЕ 2.7: Время когерентности\n');
+
+fD_EPA5 = 5;
+fD_EVA70 = 70;
+fD_ETU300 = 300;
+
+Tc_EPA5 = 9 / (16 * pi * fD_EPA5);
+Tc_EVA70 = 9 / (16 * pi * fD_EVA70);
+Tc_ETU300 = 9 / (16 * pi * fD_ETU300);
+
+fprintf('Канал EPA5 (fD=5 Гц): Tc = %.2f мс\n', Tc_EPA5 * 1000);
+fprintf('Канал EVA70 (fD=70 Гц): Tc = %.2f мс\n', Tc_EVA70 * 1000);
+fprintf('Канал ETU300 (fD=300 Гц): Tc = %.2f мс\n', Tc_ETU300 * 1000);
+
+fprintf('\nДлительность OFDM-символа: T_sym = %.2f мс\n', T_sym * 1000);
+fprintf('Для EPA5: Tc/T_sym = %.1f => медленные замирания\n', Tc_EPA5/T_sym);
+fprintf('Для EVA70: Tc/T_sym = %.2f\n', Tc_EVA70/T_sym);
+fprintf('Для ETU300: Tc/T_sym = %.3f => быстрые замирания\n', Tc_ETU300/T_sym);
+
+%% ДОП ЗАДАНИЕ 2.8: MSE ОЦЕНКИ КАНАЛА ОТ ОСШ
+fprintf('\nДОП ЗАДАНИЕ 2.8: MSE оценки канала\n');
+
+fD_test = 10;
+NumSC_mse = 1200;
+NumGuardSC_mse = round((Nfft - NumSC_mse)/2);
+pilot_step_mse = 16;
+pilot_idx_mse = 1:pilot_step_mse:NumSC_mse;
+data_idx_mse = setdiff(1:NumSC_mse, pilot_idx_mse);  % информационные поднесущие
+nPilots_mse = length(pilot_idx_mse);
+
+rayleighchan_MSE = comm.RayleighChannel( ...
+    'SampleRate', Fs, ...
+    'PathDelays', EVA_delays, ...
+    'AveragePathGains', EVA_gains_dB, ...
+    'MaximumDopplerShift', fD_test, ...
+    'NormalizePathGains', true);
+
+SNR_MSE_dB = 0:2:30;
+MSE_results = zeros(length(SNR_MSE_dB), 1);
+N_MSE_symbols = 500; 
+
+for k = 1:length(SNR_MSE_dB)
+    MSE_sum = 0;
+
+    for sym = 1:N_MSE_symbols
+        % Генерируем пилоты
+        pilot_bits = randi([0 1], nPilots_mse * log2(M_pilot), 1);
+        pilot_symbols = bi2de(reshape(pilot_bits, log2(M_pilot), []).', 'left-msb');
+        mod_pilots = qammod(pilot_symbols, M_pilot, 'UnitAveragePower', true);
+
+        % Формируем OFDM символ только с пилотами
+        Sp = zeros(Nfft, 1);
+        Sp(NumGuardSC_mse + pilot_idx_mse) = mod_pilots;
+
+        Sig = ifft(ifftshift(Sp));
+        Sig_CP = [Sig(end-CP_len+1:end); Sig];
+
+        % Передаем через канал БЕЗ шума 
+        release(rayleighchan_MSE);
+        Rx_ideal = rayleighchan_MSE(Sig_CP);
+
+        % Добавляем шум
+        Ps = mean(abs(Rx_ideal).^2);
+        SNR_linear = 10^(SNR_MSE_dB(k)/10);
+        N0 = Ps / SNR_linear;
+        sigma_noise = sqrt(N0/2);
+        noise = sigma_noise * (randn(size(Rx_ideal)) + 1j*randn(size(Rx_ideal)));
+        Rx_noisy = Rx_ideal + noise;
+
+        % Обрабатываем идеальный сигнал
+        Sig_rec_ideal = Rx_ideal(CP_len+1:CP_len+Nfft);
+        Sp_rec_ideal = fftshift(fft(Sig_rec_ideal));
+        H_true_pilots = Sp_rec_ideal(NumGuardSC_mse + pilot_idx_mse) ./ mod_pilots;
+
+        % Обрабатываем зашумленный сигнал - оценка канала
+        Sig_rec_noisy = Rx_noisy(CP_len+1:CP_len+Nfft);
+        Sp_rec_noisy = fftshift(fft(Sig_rec_noisy));
+        H_est_pilots = Sp_rec_noisy(NumGuardSC_mse + pilot_idx_mse) ./ mod_pilots;
+
+        % Интерполируем оценку и истинный канал на все активные поднесущие
+        H_true_all = interp1(pilot_idx_mse, H_true_pilots, (1:NumSC_mse)', 'linear', 'extrap');
+        H_est_all  = interp1(pilot_idx_mse, H_est_pilots,  (1:NumSC_mse)', 'linear', 'extrap');
+
+        % MSE по информационным поднесущим
+        MSE_sum = MSE_sum + mean(abs(H_est_all(data_idx_mse) - H_true_all(data_idx_mse)).^2);
+    end
+
+    MSE_results(k) = MSE_sum / N_MSE_symbols;
+end
+
+figure(19);
+semilogy(SNR_MSE_dB, MSE_results, 'b-o', 'LineWidth', 1.5, 'MarkerSize', 6);
+xlabel('SNR (дБ)');
+ylabel('MSE оценки канала');
+title(sprintf('Зависимость MSE оценки канала от ОСШ (канал EVA, fD=%d Гц)', fD_test));
+grid on;
+
+fprintf('MSE оценки канала рассчитаны.\n');
